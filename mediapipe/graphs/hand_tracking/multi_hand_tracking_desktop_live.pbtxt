@@ -9,6 +9,10 @@ output_stream: "output_video"
 # Palm detections and hand landmarks info.
 output_stream: "multi_palm_detections"
 output_stream: "multi_hand_landmarks"
+# Ono (20201021) ---
+output_stream: "multi_palm_rects"
+output_stream: "multi_hand_rects"
+# ---
 
 # Determines if an input vector of NormalizedRect has a size greater than or
 # equal to the provided min_size.
@@ -22,7 +26,7 @@ node {
       # Please also remember to modify max_vec_size in
       # ClipVectorSizeCalculatorOptions in
       # mediapipe/graphs/hand_tracking/subgraphs/multi_hand_detection_gpu.pbtxt
-      min_size: 2
+      min_size: 10
     }
   }
 }

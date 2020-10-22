@@ -34,6 +34,23 @@ constexpr char kInputStream[] = "input_video";
 constexpr char kOutputStream[] = "output_video";
 constexpr char kWindowName[] = "MediaPipe";
 
+// Ono (20201021) ---
+#include <iostream>
+#include <fstream>
+#include <sys/stat.h>
+#include <cstdio>
+#include <regex>
+#include "mediapipe/framework/formats/detection.pb.h"
+#include "mediapipe/framework/formats/landmark.pb.h"
+#include "mediapipe/framework/formats/rect.pb.h"
+
+constexpr char kOutputMultiPalmDetections[] = "multi_palm_detections";
+constexpr char kOutputMultiHandLandmarks[] = "multi_hand_landmarks";
+constexpr char kOutputMultiPalmRects[] = "multi_palm_rects";
+constexpr char kOutputMultiHandRects[] = "multi_hand_rects";
+// ---
+
+// Get argument ---
 DEFINE_string(
     calculator_graph_config_file, "",
     "Name of file containing text format CalculatorGraphConfig proto.");
@@ -43,8 +60,12 @@ DEFINE_string(input_video_path, "",
 DEFINE_string(output_video_path, "",
               "Full path of where to save result (.mp4 only). "
               "If not provided, show result in a window.");
+// ---
 
 ::mediapipe::Status RunMPPGraph() {
+
+  // Initialize graph ---
+  // Load graph config
   std::string calculator_graph_config_contents;
   MP_RETURN_IF_ERROR(mediapipe::file::GetContents(
       FLAGS_calculator_graph_config_file, &calculator_graph_config_contents));
@@ -54,9 +75,11 @@ DEFINE_string(output_video_path, "",
       mediapipe::ParseTextProtoOrDie<mediapipe::CalculatorGraphConfig>(
           calculator_graph_config_contents);
 
+  // initialize
   LOG(INFO) << "Initialize the calculator graph.";
   mediapipe::CalculatorGraph graph;
   MP_RETURN_IF_ERROR(graph.Initialize(config));
+  // ---
 
   LOG(INFO) << "Initialize the GPU.";
   ASSIGN_OR_RETURN(auto gpu_resources, mediapipe::GpuResources::Create());
@@ -64,6 +87,7 @@ DEFINE_string(output_video_path, "",
   mediapipe::GlCalculatorHelper gpu_helper;
   gpu_helper.InitializeForTest(graph.GetGpuResources().get());
 
+  // Get input video ---
   LOG(INFO) << "Initialize the camera or load the video.";
   cv::VideoCapture capture;
   const bool load_video = !FLAGS_input_video_path.empty();
@@ -73,7 +97,9 @@ DEFINE_string(output_video_path, "",
     capture.open(0);
   }
   RET_CHECK(capture.isOpened());
+  // ---
 
+  // Initialize output VideoWriter ---
   cv::VideoWriter writer;
   const bool save_video = !FLAGS_output_video_path.empty();
   if (!save_video) {
@@ -84,16 +110,47 @@ DEFINE_string(output_video_path, "",
     capture.set(cv::CAP_PROP_FPS, 30);
 #endif
   }
+  // ---
 
+  // Connect OutputStreamPoller with "output_video" on the graph ---
   LOG(INFO) << "Start running the calculator graph.";
   ASSIGN_OR_RETURN(mediapipe::OutputStreamPoller poller,
                    graph.AddOutputStreamPoller(kOutputStream));
+  // Ono (20201021) ---
+  // Connect "poller_detections" with "output_multi_palm_detections" on the graph
+  ASSIGN_OR_RETURN(mediapipe::OutputStreamPoller poller_detections,
+                   graph.AddOutputStreamPoller(kOutputMultiPalmDetections));
+  // Connect "poller_landmarks" with "output_multi_hand_landmarks" on the graph
+  ASSIGN_OR_RETURN(mediapipe::OutputStreamPoller poller_landmarks,
+                   graph.AddOutputStreamPoller(kOutputMultiHandLandmarks));
+  // Connect "poller_palm_rects" with "output_multi_palm_rects" on the graph
+  ASSIGN_OR_RETURN(mediapipe::OutputStreamPoller poller_palm_rects,
+                   graph.AddOutputStreamPoller(kOutputMultiPalmRects));
+  // Connect "poller_hand_rects" with "output_multi_hand_rects_from_landmarks" on the graph
+  ASSIGN_OR_RETURN(mediapipe::OutputStreamPoller poller_hand_rects,
+                   graph.AddOutputStreamPoller(kOutputMultiHandRects));
+  // ---
   MP_RETURN_IF_ERROR(graph.StartRun({}));
+  // ---
 
   LOG(INFO) << "Start grabbing and processing frames.";
   bool grab_frames = true;
+
+  // Ono (20201021) ---
+  int frameNum = 0; // For debug
+  // difine output folder path
+  std::string output_filename = FLAGS_output_video_path.substr(
+    FLAGS_output_video_path.rfind("/") + 1
+  );
+  std::string output_dirpath = std::string() + "./result/" + output_filename + "/";
+  mkdir(output_dirpath.c_str(), S_IRWXU | S_IRWXG | S_IRWXO);
+  // ---
+
   while (grab_frames) {
+    std::cout << "FRAMENUM: " << frameNum << std::endl;
+
     // Capture opencv camera or video frame.
+    std::cout << "Capture image." << std::endl;
     cv::Mat camera_frame_raw;
     capture >> camera_frame_raw;
     if (camera_frame_raw.empty()) break;  // End of video.
@@ -104,13 +161,16 @@ DEFINE_string(output_video_path, "",
     }
 
     // Wrap Mat into an ImageFrame.
+    std::cout << "Convert cv::Mat to ImageFrame." << std::endl;
     auto input_frame = absl::make_unique<mediapipe::ImageFrame>(
         mediapipe::ImageFormat::SRGB, camera_frame.cols, camera_frame.rows,
         mediapipe::ImageFrame::kGlDefaultAlignmentBoundary);
     cv::Mat input_frame_mat = mediapipe::formats::MatView(input_frame.get());
     camera_frame.copyTo(input_frame_mat);
 
+    // Input an ImageFrame to graph (gpu) ---
     // Prepare and add graph input packet.
+    std::cout << "Input ImageFrame to Graph." << std::endl;
     size_t frame_timestamp_us =
         (double)cv::getTickCount() / (double)cv::getTickFrequency() * 1e6;
     MP_RETURN_IF_ERROR(
@@ -127,13 +187,117 @@ DEFINE_string(output_video_path, "",
                                 .At(mediapipe::Timestamp(frame_timestamp_us))));
           return ::mediapipe::OkStatus();
         }));
+    // ---
 
+    // Take output image from OutputStreamPoller ---
     // Get the graph result packet, or stop if that fails.
-    mediapipe::Packet packet;
-    if (!poller.Next(&packet)) break;
-    std::unique_ptr<mediapipe::ImageFrame> output_frame;
+    //mediapipe::Packet packet; // original
+    //if (!poller.Next(&packet)) break; // original
+
+    // Ono (20201021) ---
+    std::cout << "Take output packet." << std::endl;
+    mediapipe::Packet packet; // output_video
+    mediapipe::Packet packet_detection;
+    mediapipe::Packet packet_landmark;
+    mediapipe::Packet packet_palm_rects;
+    mediapipe::Packet packet_hand_rects;
+    
+    std::cout << "output_video" << std::endl;
+    if (!poller.Next(&packet)){
+      std::cout << "Error: Failed to take output_video." << std::endl;
+      break;
+    }
+    std::cout << "detection" << std::endl;
+    if (!poller_detections.Next(&packet_detection)) {
+      std::cout << "Error: Failed to take detection." << std::endl;
+      break;
+    }
+    std::cout << "landmark" << std::endl;
+    if (!poller_landmarks.Next(&packet_landmark)) {
+      std::cout << "Error: Failed to take landmark." << std::endl;
+      break;
+    }
+    std::cout << "palm_rects" << std::endl;
+    if (!poller_palm_rects.Next(&packet_palm_rects)) {
+      std::cout << "Error: Failed to take palm_rects." << std::endl;
+      break;
+    }
+    std::cout << "hand_rects" << std::endl;
+    if (!poller_hand_rects.Next(&packet_hand_rects)) {
+      std::cout << "Error: Failed to take hand_rects." << std::endl;
+      break;
+    }
+    std::cout << "DEBUG" << std::endl;
+    
+    // Get output from packet
+    auto &output_detections = packet_detection.Get<std::vector<mediapipe::Detection>>();
+    auto &output_landmarks = packet_landmark.Get<std::vector<mediapipe::NormalizedLandmarkList>>();
+    auto &output_palm_rects = packet_palm_rects.Get<std::vector<mediapipe::NormalizedRect>>();
+    auto &output_hand_rects = packet_hand_rects.Get<std::vector<mediapipe::NormalizedRect>>();
+
+    // output file
+    std::cout << "Output: DETECTIONS." << std::endl;
+    for (int j = 0; j < output_detections.size(); j++)
+    {
+      std::ostringstream os;
+      os << output_dirpath + "/"
+         << "FRAMENUM=" << frameNum << "_"
+         << "detection_"
+         << "j=" << j << ".txt";
+      std::ofstream outputfile(os.str());
+
+      std::string serializedStr;
+      output_detections[j].SerializeToString(&serializedStr);
+      outputfile << serializedStr << std::flush;
+    }
+    std::cout << "Output: LANDMARK." << std::endl;
+    for (int j = 0; j < output_landmarks.size(); j++)
+    {
+      std::ostringstream os;
+      os << output_dirpath + "/"
+         << "FRAMENUM=" << frameNum << "_"
+         << "landmark_"
+         << "j=" << j << ".txt";
+      std::ofstream outputfile(os.str());
+
+      std::string serializedStr;
+      output_landmarks[j].SerializeToString(&serializedStr);
+      outputfile << serializedStr << std::flush;
+    }
+    std::cout << "Output: PALMRECT." << std::endl;
+    for (int j = 0; j < output_palm_rects.size(); j++)
+    {
+      std::ostringstream os;
+      os << output_dirpath + "/"
+         << "FRAMENUM=" << frameNum << "_"
+         << "palmRect_"
+         << "j=" << j << ".txt";
+      std::ofstream outputfile(os.str());
+
+      std::string serializedStr;
+      output_palm_rects[j].SerializeToString(&serializedStr);
+      outputfile << serializedStr << std::flush;
+    }
+    std::cout << "Output: HANDRECT." << std::endl;
+    for (int j = 0; j < output_hand_rects.size(); j++)
+    {
+      std::ostringstream os;
+      os << output_dirpath + "/"
+         << "FRAMENUM=" << frameNum << "_"
+         << "handRect_"
+         << "j=" << j << ".txt";
+      std::ofstream outputfile(os.str());
+
+      std::string serializedStr;
+      output_hand_rects[j].SerializeToString(&serializedStr);
+      outputfile << serializedStr << std::flush;
+    }
+    // ---
+    // ---
 
     // Convert GpuBuffer to ImageFrame.
+    std::cout << "Convert GpuBuffer to ImageFrame." << std::endl;
+    std::unique_ptr<mediapipe::ImageFrame> output_frame;
     MP_RETURN_IF_ERROR(gpu_helper.RunInGlContext(
         [&packet, &output_frame, &gpu_helper]() -> ::mediapipe::Status {
           auto& gpu_frame = packet.Get<mediapipe::GpuBuffer>();
@@ -153,6 +317,7 @@ DEFINE_string(output_video_path, "",
         }));
 
     // Convert back to opencv for display or saving.
+    std::cout << "Save output data." << std::endl;
     cv::Mat output_frame_mat = mediapipe::formats::MatView(output_frame.get());
     cv::cvtColor(output_frame_mat, output_frame_mat, cv::COLOR_RGB2BGR);
     if (save_video) {
@@ -170,6 +335,8 @@ DEFINE_string(output_video_path, "",
       const int pressed_key = cv::waitKey(5);
       if (pressed_key >= 0 && pressed_key != 255) grab_frames = false;
     }
+    
+    frameNum++;
   }
 
   LOG(INFO) << "Shutting down.";
